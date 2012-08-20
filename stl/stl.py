@@ -31,6 +31,7 @@ from types import GeneratorType
 from itools.core import freeze
 from itools.datatypes import Boolean
 from itools.gettext import MSG
+from itools.log import log_error
 from itools.uri import Path, Reference, get_reference
 from itools.xml import XMLParser, find_end, stream_to_str
 from itools.xml import DOCUMENT_TYPE, START_ELEMENT, END_ELEMENT, TEXT
@@ -87,7 +88,9 @@ def evaluate(expression, stack, repeat_stack):
         try:
             value = value[name]
         except KeyError:
-            raise STLError, ERR_EXPR_NAME % (name, expression)
+            value = ''
+            log_error('STLError, %s' % (ERR_EXPR_NAME % (name, expression)))
+            #raise STLError, ERR_EXPR_NAME % (name, expression)
 
 
     # Call
