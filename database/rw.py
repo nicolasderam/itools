@@ -19,8 +19,14 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 # Import from the Standard Library
+from binascii import unhexlify
 from datetime import datetime
+from heapq import heappush, heappop
 from os.path import dirname
+
+# Import from pygit2
+from pygit2 import GitError
+from pygit2 import TreeBuilder, GIT_FILEMODE_TREE
 
 # Import from itools
 from itools.core import get_pipe, lazy
@@ -31,9 +37,57 @@ from catalog import Catalog, make_catalog
 from registry import get_register_fields
 from ro import ROGitDatabase
 
-
-
 MSG_URI_IS_BUSY = 'The "%s" URI is busy.'
+
+EMPTY_TREE = unhexlify('4b825dc642cb6eb9a060e54bf8d69288fbee4904')
+
+
+class Heap(object):
+    """
+    This object behaves very much like a sorted dict, but for security only a
+    subset of the dict API is exposed:
+
+       >>> len(heap)
+       >>> heap[path] = value
+       >>> value = heap.get(path)
+       >>> path, value = heap.popitem()
+
+    The keys are relative paths as used in Git trees, like 'a/b/c' (and '' for
+    the root).
+
+    The dictionary is sorted so deeper paths are considered smaller, and so
+    returned first by 'popitem'. The order relation between two paths of equal
+    depth is undefined.
+
+    This data structure is used by RWDatabase._save_changes to build the tree
+    objects before commit.
+    """
+
+    def __init__(self):
+        self._dict = {}
+        self._heap = []
+
+
+    def __len__(self):
+        return len(self._dict)
+
+
+    def get(self, path):
+        return self._dict.get(path)
+
+
+    def __setitem__(self, path, value):
+        if path not in self._dict:
+            n = -path.count('/') if path else 1
+            heappush(self._heap, (n, path))
+
+        self._dict[path] = value
+
+
+    def popitem(self):
+        key = heappop(self._heap)
+        path = key[1]
+        return path, self._dict.pop(path)
 
 
 
@@ -44,6 +98,7 @@ class GitDatabase(ROGitDatabase):
 
         # The "git add" arguments
         self.added = set()
+        self.removed = set()
         self.changed = set()
         self.has_changed = False
 
@@ -145,6 +200,7 @@ class GitDatabase(ROGitDatabase):
         self.push_handler(key, handler)
         self.added.add(key)
         # Changed
+        self.removed.discard(key)
         self.has_changed = True
 
 
@@ -161,6 +217,7 @@ class GitDatabase(ROGitDatabase):
                 self.changed.discard(key)
                 self.worktree.git_rm(key)
             # Changed
+            self.removed.add(key)
             self.has_changed = True
             return
 
@@ -180,6 +237,7 @@ class GitDatabase(ROGitDatabase):
             self.worktree.git_rm(key)
 
         # Changed
+        self.removed.add(key)
         self.has_changed = True
 
 
@@ -194,6 +252,7 @@ class GitDatabase(ROGitDatabase):
         if self.is_phantom(handler):
             self.cache[key] = handler
             self.added.add(key)
+            self.removed.discard(key)
             self.has_changed = True
             return
 
@@ -206,6 +265,7 @@ class GitDatabase(ROGitDatabase):
             # Update database state (XXX Should we do this?)
             self.changed.add(key)
             # Changed
+            self.removed.discard(key)
             self.has_changed = True
 
 
@@ -258,6 +318,7 @@ class GitDatabase(ROGitDatabase):
             self.added.add(target)
 
         # Changed
+        self.removed.discard(target)
         self.has_changed = True
 
 
@@ -292,6 +353,8 @@ class GitDatabase(ROGitDatabase):
             self.added.add(target)
 
             # Changed
+            self.removed.add(source)
+            self.removed.discard(target)
             self.has_changed = True
             return
 
@@ -321,6 +384,8 @@ class GitDatabase(ROGitDatabase):
                 self.added.add(path)
 
         # Changed
+        self.removed.add(source)
+        self.removed.discard(target)
         self.has_changed = True
 
 
@@ -421,6 +486,7 @@ class GitDatabase(ROGitDatabase):
         # Reset state
         self.added.clear()
         self.changed.clear()
+        self.removed.clear()
 
         # 2. Catalog
         self.catalog.abort_changes()
@@ -449,7 +515,9 @@ class GitDatabase(ROGitDatabase):
         return None, None, None, [], []
 
 
-    def _save_changes(self, data):
+    def _save_changes(self, data, EMPTY_TREE=EMPTY_TREE):
+        worktree = self.worktree
+
         # 1. Synchronize the handlers and the filesystem
         added = self.added
         for key in added:
@@ -469,16 +537,87 @@ class GitDatabase(ROGitDatabase):
         git_author, git_date, git_msg, docs_to_index, docs_to_unindex = data
         git_msg = git_msg or 'no comment'
 
-        # 3. Call git
+        # 3. Git add
         git_add = list(added) + list(changed)
-        self.worktree.git_add(*git_add)
-        self.worktree.git_commit(git_msg, git_author, git_date)
+        worktree.git_add(*git_add)
 
-        # 4. Clear state
+        # 4. Create the tree
+        repo = worktree.repo
+        index = repo.index
+        try:
+            head = repo.revparse_single('HEAD')
+        except KeyError:
+            git_tree = None
+        else:
+            root = head.tree
+            # Initialize the heap
+            heap = Heap()
+            heap[''] = repo.TreeBuilder(root)
+            for key in git_add:
+                entry = index[key]
+                heap[key] = (entry.oid, entry.mode)
+            for key in self.removed:
+                heap[key] = None
+
+            while heap:
+                path, value = heap.popitem()
+                # Stop condition
+                if path == '':
+                    git_tree = value.write()
+                    break
+
+                if type(value) is TreeBuilder:
+                    oid = value.write()
+                    # TODO Once pygit2 wraps the git_treebuilder_entrycount
+                    # call, we will be able to be more efficient here.
+                    if oid == EMPTY_TREE:
+                        value = None
+                    else:
+                        value = (oid, GIT_FILEMODE_TREE)
+
+                # Split the path
+                if '/' in path:
+                    parent, name = path.rsplit('/', 1)
+                else:
+                    parent = ''
+                    name = path
+
+                # Get the tree builder
+                tb = heap.get(parent)
+                if tb is None:
+                    try:
+                        tentry = root[parent]
+                    except KeyError:
+                        tb = repo.TreeBuilder()
+                    else:
+                        tree = repo[tentry.oid]
+                        tb = repo.TreeBuilder(tree)
+                    heap[parent] = tb
+
+                # Modify
+                if value is None:
+                    # Sometimes there are empty folders left in the
+                    # filesystem, but not in the tree, then we get a
+                    # "Failed to remove entry" error.  Be robust.
+                    # XXX We may catch too much here, once pygit2 wraps
+                    # git_treebuilder_get we will be able to write more
+                    # reliable code.
+                    try:
+                        tb.remove(name)
+                    except GitError:
+                        pass
+                else:
+                    tb.insert(name, value[0], value[1])
+
+        # 5. Git commit
+        worktree.git_commit(git_msg, git_author, git_date, tree=git_tree)
+
+        # 6. Clear state
         changed.clear()
         added.clear()
+        self.removed.clear()
 
-        # 5. Catalog
+        # 7. Catalog
         catalog = self.catalog
         for path in docs_to_unindex:
             catalog.unindex_document(path)
