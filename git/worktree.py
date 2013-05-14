@@ -31,6 +31,7 @@ from pygit2 import GIT_STATUS_WT_MODIFIED, GIT_STATUS_WT_DELETED
 
 # Import from itools
 from itools.core import lazy
+from itools.log import log_error
 
 
 def message_short(commit):
@@ -439,6 +440,7 @@ class Worktree(object):
         latest commit.
         """
         from pygit2 import GIT_CHECKOUT_FORCE
+        log_error('ABORT ! Performing GIT RESET...', domain='itools.web')
         self.repo.checkout(GIT_CHECKOUT_FORCE, head=True)
         return
         # (1) Read tree
