@@ -16,6 +16,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 # Import from the standard library
+from datetime import datetime
 from hashlib import sha1
 from marshal import dumps, loads
 
@@ -24,6 +25,7 @@ from xapian import sortable_serialise, sortable_unserialise
 from xapian import Document, Query, TermGenerator
 
 # Import from itools
+from itools.core import fixed_offset
 from itools.datatypes import Integer, Unicode
 from itools.i18n import is_punctuation
 
@@ -87,6 +89,11 @@ def _encode_simple_value(field_cls, value):
     # XXX warning: this doesn't work with the big integers!
     if issubclass(field_cls, Integer):
         return sortable_serialise(value)
+
+    # Datetimes: normalize to UTC, so searching works
+    if type(value) is datetime:
+        value = value.astimezone(fixed_offset(0))
+
     # A common field or a new field
     return field_cls.encode(value)
 
