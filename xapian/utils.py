@@ -92,7 +92,13 @@ def _encode_simple_value(field_cls, value):
 
     # Datetimes: normalize to UTC, so searching works
     if type(value) is datetime:
-        value = value.astimezone(fixed_offset(0))
+        try:
+            value = value.astimezone(fixed_offset(0))
+        except:
+            from itools.web import get_context
+            context = get_context()
+            value = context.fix_tzinfo(value)
+            value = value.astimezone(fixed_offset(0))
 
     # A common field or a new field
     return field_cls.encode(value)
