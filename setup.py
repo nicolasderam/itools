@@ -61,6 +61,10 @@ if __name__ == '__main__':
     # DOC indexation
     try:
         flags = get_compile_flags('wv2-config --cflags --libs')
+        # Fix some libs which could be prefixed by '-l'
+        for index, lib in enumerate(flags.get('libraries', [])):
+            if lib[:2] == '-l':
+                flags['libraries'][index] = lib[2:]
     except EnvironmentError:
         print >> stderr, 'Warning: wv2 library is not found.'
         print >> stderr, 'DOC indexation will not be available'
