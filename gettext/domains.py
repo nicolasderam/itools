@@ -61,6 +61,9 @@ class Domain(dict):
 
 
     def gettext(self, message, language):
+        if not message:
+            return message
+
         if language not in self:
             return message
         handler = self[language]
@@ -103,8 +106,9 @@ class MSG(prototype):
             domain = _getframe(2).f_globals.get('__name__')
             self.domain = domain.split('.', 1)[0]
 
-        if message:
-            self.message = message
+        if message is None:
+            message = ''
+        self.message = message
 
 
     def _format(self, message, **kw):
